@@ -8,7 +8,6 @@ from glob import glob
 from io import BytesIO
 from pathlib import Path
 from collections import Counter
-
 import yaml
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
