@@ -10,6 +10,7 @@ from pathlib import Path
 from collections import Counter
 
 import yaml
+import snowflake.connector
 import streamlit as st
 from PIL import Image, ImageDraw
 
@@ -22,6 +23,12 @@ ANNOTATED_DIR = os.path.join(OUTPUT_DIR, "annotated")
 EXPORTS_DIR = os.path.join(OUTPUT_DIR, "exports")
 CONFIG_PATH = os.path.join(OUTPUT_DIR, "config.json")
 CANVAS_MAX_WIDTH = 960
+SNOWFLAKE_STAGE = "@DEMO_DB.STREAMLIT_DEV.ANNOTATION_IMAGES"
+SNOWFLAKE_IMAGES_STAGE = SNOWFLAKE_STAGE + "/images/"
+SNOWFLAKE_ANNOTATIONS_STAGE = SNOWFLAKE_STAGE + "/output/annotations/"
+SNOWFLAKE_ANNOTATED_STAGE = SNOWFLAKE_STAGE + "/output/annotated/"
+SNOWFLAKE_EXPORTS_STAGE = SNOWFLAKE_STAGE + "/output/exports/"
+SNOWFLAKE_CONNECTION = os.getenv("SNOWFLAKE_CONNECTION_NAME") or "default"
 DEFAULT_LABELS = ["plane", "terminal", "car"]
 COLOR_PALETTE = [
     "#00C853",
@@ -75,6 +82,29 @@ for d in [IMAGES_DIR, ANNOTATIONS_DIR, ANNOTATED_DIR, EXPORTS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
+@st.cache_data(ttl=300, show_spinner="Syncing images from Snowflake stage...")
+def sync_images_from_stage():
+    try:
+        conn = snowflake.connector.connect(connection_name=SNOWFLAKE_CONNECTION)
+        cur = conn.cursor()
+        cur.execute(f"LIST {SNOWFLAKE_IMAGES_STAGE}")
+        stage_files = cur.fetchall()
+        for row in stage_files:
+            fname = row[0].split("/")[-1]
+            if fname.endswith(".gz"):
+                fname = fname[:-3]
+            local_path = os.path.join(IMAGES_DIR, fname)
+            if not os.path.exists(local_path):
+                cur.execute(f"GET {SNOWFLAKE_IMAGES_STAGE}{fname} file://{IMAGES_DIR}/")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        st.warning(f"Could not sync from Snowflake stage: {e}")
+
+
+sync_images_from_stage()
+
+
 def load_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
@@ -114,6 +144,19 @@ def load_annotation(image_path):
     return {"image": os.path.basename(image_path), "annotations": []}
 
 
+def upload_to_stage(local_path, stage_path):
+    try:
+        conn = snowflake.connector.connect(connection_name=SNOWFLAKE_CONNECTION)
+        cur = conn.cursor()
+        cur.execute(
+            f"PUT file://{local_path} {stage_path} AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+        )
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
 def save_annotation(image_path, annotations, label_colors):
     img = Image.open(image_path)
     data = {
@@ -150,7 +193,11 @@ def save_annotation(image_path, annotations, label_colors):
                 fill=(r, g, b, 255),
             )
     annotated = Image.alpha_composite(annotated, overlay).convert("RGB")
-    annotated.save(os.path.join(ANNOTATED_DIR, os.path.basename(image_path)))
+    annotated_path = os.path.join(ANNOTATED_DIR, os.path.basename(image_path))
+    annotated.save(annotated_path)
+
+    upload_to_stage(annotation_path(image_path), SNOWFLAKE_ANNOTATIONS_STAGE)
+    upload_to_stage(annotated_path, SNOWFLAKE_ANNOTATED_STAGE)
 
 
 def image_to_data_uri(image_path, max_w):
@@ -243,6 +290,7 @@ def export_coco(image_list, config, label_colors):
     out_path = os.path.join(EXPORTS_DIR, "coco_annotations.json")
     with open(out_path, "w") as f:
         json.dump(coco, f, indent=2)
+    upload_to_stage(out_path, SNOWFLAKE_EXPORTS_STAGE)
     return out_path
 
 
@@ -301,6 +349,7 @@ def export_yolo(image_list, config, label_colors):
     yaml_path = os.path.join(yolo_dir, "data.yaml")
     with open(yaml_path, "w") as f:
         yaml.dump(data_yaml, f, default_flow_style=False)
+    upload_to_stage(yaml_path, SNOWFLAKE_EXPORTS_STAGE)
     return yolo_dir
 
 
