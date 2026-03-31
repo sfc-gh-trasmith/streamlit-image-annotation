@@ -8,6 +8,7 @@ from glob import glob
 from io import BytesIO
 from pathlib import Path
 from collections import Counter
+import gzip
 import yaml
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
@@ -85,14 +86,36 @@ session = get_active_session()
 def sync_from_stage():
     try:
         session.file.get(SNOWFLAKE_IMAGES_STAGE, IMAGES_DIR)
+        for f in os.listdir(IMAGES_DIR):
+            if f.endswith(".gz"):
+                gz_path = os.path.join(IMAGES_DIR, f)
+                out_path = os.path.join(IMAGES_DIR, f[:-3])
+                with gzip.open(gz_path, "rb") as gz_in:
+                    with open(out_path, "wb") as raw_out:
+                        shutil.copyfileobj(gz_in, raw_out)
+                os.remove(gz_path)
     except Exception as e:
         st.warning(f"Could not sync images from stage: {e}")
     try:
         session.file.get(SNOWFLAKE_ANNOTATIONS_STAGE, ANNOTATIONS_DIR)
+        for f in os.listdir(ANNOTATIONS_DIR):
+            if f.endswith(".gz"):
+                gz_path = os.path.join(ANNOTATIONS_DIR, f)
+                out_path = os.path.join(ANNOTATIONS_DIR, f[:-3])
+                with gzip.open(gz_path, "rb") as gz_in:
+                    with open(out_path, "wb") as raw_out:
+                        shutil.copyfileobj(gz_in, raw_out)
+                os.remove(gz_path)
     except Exception:
         pass
     try:
         session.file.get(SNOWFLAKE_CONFIG_STAGE + "config.json", OUTPUT_DIR)
+        gz_cfg = CONFIG_PATH + ".gz"
+        if os.path.exists(gz_cfg):
+            with gzip.open(gz_cfg, "rb") as gz_in:
+                with open(CONFIG_PATH, "wb") as raw_out:
+                    shutil.copyfileobj(gz_in, raw_out)
+            os.remove(gz_cfg)
     except Exception:
         pass
 
