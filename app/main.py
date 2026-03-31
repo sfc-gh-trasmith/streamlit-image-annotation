@@ -10,14 +10,12 @@ from pathlib import Path
 from collections import Counter
 
 import yaml
-import snowflake.connector
 import streamlit as st
+from snowflake.snowpark.context import get_active_session
 from PIL import Image, ImageDraw
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(APP_DIR)
-IMAGES_DIR = os.path.join(PROJECT_ROOT, "images")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+IMAGES_DIR = "/tmp/images"
+OUTPUT_DIR = "/tmp/output"
 ANNOTATIONS_DIR = os.path.join(OUTPUT_DIR, "annotations")
 ANNOTATED_DIR = os.path.join(OUTPUT_DIR, "annotated")
 EXPORTS_DIR = os.path.join(OUTPUT_DIR, "exports")
@@ -28,7 +26,7 @@ SNOWFLAKE_IMAGES_STAGE = SNOWFLAKE_STAGE + "/images/"
 SNOWFLAKE_ANNOTATIONS_STAGE = SNOWFLAKE_STAGE + "/output/annotations/"
 SNOWFLAKE_ANNOTATED_STAGE = SNOWFLAKE_STAGE + "/output/annotated/"
 SNOWFLAKE_EXPORTS_STAGE = SNOWFLAKE_STAGE + "/output/exports/"
-SNOWFLAKE_CONNECTION = os.getenv("SNOWFLAKE_CONNECTION_NAME") or "default"
+SNOWFLAKE_CONFIG_STAGE = SNOWFLAKE_STAGE + "/output/"
 DEFAULT_LABELS = ["plane", "terminal", "car"]
 COLOR_PALETTE = [
     "#00C853",
@@ -82,27 +80,27 @@ for d in [IMAGES_DIR, ANNOTATIONS_DIR, ANNOTATED_DIR, EXPORTS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
-@st.cache_data(ttl=300, show_spinner="Syncing images from Snowflake stage...")
-def sync_images_from_stage():
+session = get_active_session()
+
+
+def sync_from_stage():
     try:
-        conn = snowflake.connector.connect(connection_name=SNOWFLAKE_CONNECTION)
-        cur = conn.cursor()
-        cur.execute(f"LIST {SNOWFLAKE_IMAGES_STAGE}")
-        stage_files = cur.fetchall()
-        for row in stage_files:
-            fname = row[0].split("/")[-1]
-            if fname.endswith(".gz"):
-                fname = fname[:-3]
-            local_path = os.path.join(IMAGES_DIR, fname)
-            if not os.path.exists(local_path):
-                cur.execute(f"GET {SNOWFLAKE_IMAGES_STAGE}{fname} file://{IMAGES_DIR}/")
-        cur.close()
-        conn.close()
+        session.file.get(SNOWFLAKE_IMAGES_STAGE, IMAGES_DIR)
     except Exception as e:
-        st.warning(f"Could not sync from Snowflake stage: {e}")
+        st.warning(f"Could not sync images from stage: {e}")
+    try:
+        session.file.get(SNOWFLAKE_ANNOTATIONS_STAGE, ANNOTATIONS_DIR)
+    except Exception:
+        pass
+    try:
+        session.file.get(SNOWFLAKE_CONFIG_STAGE + "config.json", OUTPUT_DIR)
+    except Exception:
+        pass
 
 
-sync_images_from_stage()
+if "_stage_synced" not in st.session_state:
+    sync_from_stage()
+    st.session_state._stage_synced = True
 
 
 def load_config():
@@ -115,6 +113,7 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+    upload_to_stage(CONFIG_PATH, SNOWFLAKE_CONFIG_STAGE)
 
 
 def get_label_colors(labels):
@@ -146,13 +145,7 @@ def load_annotation(image_path):
 
 def upload_to_stage(local_path, stage_path):
     try:
-        conn = snowflake.connector.connect(connection_name=SNOWFLAKE_CONNECTION)
-        cur = conn.cursor()
-        cur.execute(
-            f"PUT file://{local_path} {stage_path} AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-        )
-        cur.close()
-        conn.close()
+        session.file.put(local_path, stage_path, auto_compress=False, overwrite=True)
     except Exception:
         pass
 
